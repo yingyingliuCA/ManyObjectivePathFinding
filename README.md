@@ -1,5 +1,5 @@
-# MultiObjectivePathFinding
-Multi-objective path finding based on real road network
+# ManyObjectivePathFinding
+Many-objective path finding based on real road network
 
 usage: 
 $python3 trafficMOO.py
