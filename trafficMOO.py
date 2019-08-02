@@ -12,6 +12,10 @@ import datetime
 from datetime import timedelta
 import random
 import copy
+import plotly.graph_objects as go
+import plotly.express as px 
+import plotly.io
+import sys
 
 #references of NSGAII implmentation:
 # 1. A Fast and Elitist Multiobjective Genetic Algorithm: NSGA-II, Kalyanmoy Deb, Associate Member, IEEE, Amrit Pratap, Sameer Agarwal, and T. Meyarivan
@@ -32,6 +36,8 @@ CROSSOVER_MNX = 1 #Multiple node crossover
 CROSSOVER_PMX = 2 #Partially mapped crossover. Not implemented. PMX is crossover for permutations so it's not fit here
 MUTATION_NO = 0 #No mutation
 MUTATION_YES = 1 #Perform mutation
+DYNAMIC_NO = 0
+DYNAMIC_YES = 1
 
 def is_valid_path(path, start, end):
 	if path[0] == start and path[-1] == end:
@@ -83,32 +89,50 @@ def create_population():
 		# print('my path:',randPath)
 	return population
 
-def fitness_scores(path):
+def fitness_scores(path, dynamicFlag):
 	total_distance = 0
 	total_turns = 0	
 	total_travelTime = 0
 	total_emission = 0
 	index = 0
 	currNode = path[index]
+	currTimeIdx = 0
 	edges = list(G.edges())
+
 	while currNode != endNode: #assume the path is valid (the last node is endNode)
 		index = index + 1
 		nextNode = path[index]
-		total_distance = total_distance + G.edges[currNode, nextNode]['length']
-		total_turns = total_turns + G.edges[currNode, nextNode]['isTurn']
-		edgeId = edges.index((currNode, nextNode))
-		total_travelTime = total_travelTime + travelTimeMatrix[edgeId][0] #static for now, change to time index for dynamic 
-		total_emission = total_emission + emissionMatrix[edgeId][0]
-		currNode = nextNode
+		if G.has_edge(currNode, nextNode): 
+			total_distance = total_distance + G.edges[currNode, nextNode]['length']
+			total_turns = total_turns + G.edges[currNode, nextNode]['isTurn']
+			edgeId = edges.index((currNode, nextNode))
+			if dynamicFlag == DYNAMIC_NO:
+				total_travelTime = total_travelTime + travelTimeMatrix[edgeId][0] #static for now, change to time index for dynamic 
+				total_emission = total_emission + emissionMatrix[edgeId][0]
+				# print('total_travelTime:',total_travelTime,',total_emission:',total_emission)
+			if dynamicFlag == DYNAMIC_YES:
+				total_travelTime = total_travelTime + travelTimeMatrix[edgeId][currTimeIdx]
+				# total_emission = total_emission + emissionMatrix[edgeId][currTimeIdx]
+				total_emission = total_emission + emissionMatrix[edgeId][currTimeIdx]*travelTimeMatrix[edgeId][currTimeIdx]/3600 #TECPerHour*TravelTimeSecond/3600 sec per hour
+				currTimeIdx = math.floor(total_travelTime/300) #every time instance is 5 minutes (300 seconds)
+				# print('total_travelTime:',total_travelTime,',total_emission:',total_emission,',currTimeIdx:',currTimeIdx, ',travelTimeMatrix[edgeId][currTimeIdx]=',travelTimeMatrix[edgeId][currTimeIdx])
+			currNode = nextNode
+		else: #in any case if the edge is invalid (maybe through deleting loops), assign large numbers to the scores to make sure this solution is eliminated
+			total_emission = sys.maxsize
+			total_travelTime = sys.maxsize
+			total_turns = sys.maxsize
+			total_distance = sys.maxsize
+			break 
 
 	#convert distance from meters to KM and travel time from seconds to minutes
-	return np.asarray([total_distance/1000.0, total_turns, total_travelTime/60.0, total_emission])
+	# return np.asarray([total_distance/1000.0, total_turns, total_travelTime/60.0, total_emission])
+	return np.asarray([total_emission, total_travelTime/60.0, total_turns, total_distance/1000.0])
 	# return [total_distance, total_turns, total_travelTime, total_emission]
 
-def score_population(population):
+def score_population(population, dynamicFlag):
 	populationScores = np.zeros((len(population),numObjectives)) #4 objectives
 	for i in range(len(population)):
-		populationScores[i,:] = fitness_scores(population[i])
+		populationScores[i,:] = fitness_scores(population[i], dynamicFlag)
 	return populationScores
 
 def non_dominated(scores1, scores2): #arguments need to be in the form of array instead of list?
@@ -120,7 +144,7 @@ def non_dominated(scores1, scores2): #arguments need to be in the form of array 
 		else:
 			return NO_DOMINATION #neither dominates the other		
 
-def tournament_selection(population):
+def tournament_selection(population, dynamicFlag):
 	firstFlag = 0 
 	for i in range(tournamentSize):
 		index = random.randint(0, len(population)-1)
@@ -129,9 +153,9 @@ def tournament_selection(population):
 			firstFlag = 1
 		else:
 			referencePath = population[winner]
-			referenceScores = fitness_scores(referencePath)
+			referenceScores = fitness_scores(referencePath, dynamicFlag)
 			path = population[index]
-			scores = fitness_scores(path)
+			scores = fitness_scores(path, dynamicFlag)
 			non_dominatedFlag = non_dominated(scores, referenceScores)
 			if non_dominatedFlag == FIRST_NON_DOMINATED: #if scores dominates referenceScores
 				winner = index
@@ -169,17 +193,17 @@ def mutation(population, mutationProbability):
 	return population
 
 
-def crossover_NBX(population, maxNumCrossoverPoints = 1):
-	parent1 = population[tournament_selection(population)]
-	parent2 = population[tournament_selection(population)]
+def crossover_NBX(population, dynamicFlag, maxNumCrossoverPoints = 1):
+	parent1 = population[tournament_selection(population, dynamicFlag)]
+	parent2 = population[tournament_selection(population, dynamicFlag)]
 	# print('parent1:\n',parent1)
 	# print('parent2:\n',parent2)
 	#find a random node that exists in both parents. The node is neither startNode nor endNode
 	commonNodes = list((set(parent1).intersection(set(parent2))).difference({startNode,endNode}))
 	# print('commonNodes:\n',commonNodes)
 	while len(commonNodes) == 0: #if no common node except for start and end nodes, select different parents
-		parent1 = population[tournament_selection(population)]
-		parent2 = population[tournament_selection(population)]
+		parent1 = population[tournament_selection(population, dynamicFlag)]
+		parent2 = population[tournament_selection(population, dynamicFlag)]
 		commonNodes = list((set(parent1).intersection(set(parent2))).difference({startNode,endNode}))
 	numCrossOvers = min(len(commonNodes), maxNumCrossoverPoints)
 	crossOverPoints = []
@@ -224,13 +248,13 @@ def crossover_NBX(population, maxNumCrossoverPoints = 1):
 #todo: multiple point crossover and PMX 
 #benefit of PMX: don't have to have common node - but it is for permutation where two parents are aligned
  
-def breed_population(population, crossoverFlag = CROSSOVER_NBX, mutationFlag = MUTATION_NO, mutationProbability = 0.5): #defaults
+def breed_population(population, dynamicFlag, crossoverFlag = CROSSOVER_NBX, mutationFlag = MUTATION_NO, mutationProbability = 0.5): #defaults
 	newPopulation = []
 	for i in range(int(len(population)/2)):
 		if crossoverFlag == CROSSOVER_NBX:
-			child1,child2 = crossover_NBX(population, 1)
+			child1,child2 = crossover_NBX(population, dynamicFlag, 1)
 		if crossoverFlag == CROSSOVER_MNX:
-			child1,child2 = crossover_NBX(population, 5) #maximum 5 crossover nodes
+			child1,child2 = crossover_NBX(population, dynamicFlag, 5) #maximum 5 crossover nodes
 		newPopulation.append(child1)
 		newPopulation.append(child2)
 	#allow parents and children to compete
@@ -348,29 +372,7 @@ def build_pareto_population(population, scores):
 		if i in paretoFrontList:
 			newPopulation.append(population[i])
 	# print('new population size:',len(newPopulation))
-	return newPopulation
-
-class NSGAIICustom(NSGAII):
-	def __init__(self, problem,
-	         population_size = 100,
-	         generator = RandomGenerator(),
-	         selector = TournamentSelector(2),
-	         variator = None,
-	         archive = None,
-	         **kwargs):
-		super(NSGAIICustom, self).__init__(problem, population_size, generator, **kwargs)
-		self.selector = selector
-		self.variator = variator
-		self.archive = archive
-
-  #   def initialize(self):
-  #   	self.population = [self.generator.generate(self.problem) for _ in range(self.population_size)]
-		# print('my population:',self.population)
-		# self.evaluate_all(self.population)
-		# if self.archive is not None:
-		#     self.archive += self.population       
-		# if self.variator is None:
-		#     self.variator = default_variator(self.problem)       	
+	return newPopulation     	
 
 # function author: Ziyue Wang
 # modified by Ying Ying Liu
@@ -384,7 +386,7 @@ def process_static(debug = False):
 		nodes[metaData['POINT_1_NAME'][i]] = (float(metaData['POINT_1_LAT'][i]), 
 			float(metaData['POINT_1_LNG'][i]))
 		nodes[metaData['POINT_2_NAME'][i]] = (float(metaData['POINT_2_LAT'][i]), 
-			float(metaData['POINT_2_LNG'][i]))
+			float(metaData['POINT_2_LNG'][i]))	
 	# insert nodes to the graph
 	# uniqueNodes = dict()
 	# i = 0
@@ -401,7 +403,7 @@ def process_static(debug = False):
 		s = metaData['POINT_1_NAME'][i]
 		t = metaData['POINT_2_NAME'][i]
 		l = int(metaData['DISTANCE_IN_METERS'][i])
-		speedLimit = int(metaData['NDT_IN_KMH'][i])
+		speedLimit = int(metaData['NDT_IN_KMH'][i]) #not sure if NDT_IN_KMH is speed limit, but it can also be treated like average speed
 		isTurn = 0
 		sStreet = str(metaData['POINT_1_STREET'][i]).strip()
 		tStreet = str(metaData['POINT_2_STREET'][i]).strip()
@@ -426,6 +428,9 @@ def read_traffic_data():
 	# G2 = nx.read_gml('data/citypulse_static.gml')
 	##uncomment to draw graph
 	# pos=nx.spring_layout(G)
+	# pos={}
+	# for node in G.nodes():
+	# 	pos[node] = [G.node[node]['pos'][0],G.node[node]['pos'][1]]
 	# lab=dict(zip(G,G.nodes())) #use node id as label
 	# nx.draw(G,pos=pos,node_size=15,with_labels=False) #first suppress the default labels
 	# nx.draw_networkx_labels(G,pos, lab, font_size=6) #then draw with the custom labels
@@ -453,7 +458,7 @@ def read_traffic_data():
 		s = edges[i][0]
 		t = edges[i][1]
 		length = G.edges[s,t]['length']
-		speedLimit = G.edges[s,t]['speedLimit']
+		speedLimit = G.edges[s,t]['speedLimit'] #KMH
 		sNodeId = nodes.index(s)
 		tNodeId = nodes.index(t)
 		edgeId = i
@@ -465,33 +470,44 @@ def read_traffic_data():
 		rowIdx = 0
 		timeIdx = 0
 		lengthInFoot = length * 3.28084 # 1 meter = 3.28084 foot
-		while timeIdx < 12: #just read 12 instances for quick testing
+		# while timeIdx < 12: #just read 12 instances for quick testing
+		while timeIdx < 100:
 			posTimeObj = minTimeStampObj + timeIdx*timedelta(minutes=5)
 			currTimeObj = datetime.datetime.strptime(trafficData['TIMESTAMP'][rowIdx],'%Y-%m-%dT%H:%M:%S')
 			if currTimeObj - posTimeObj == timedelta(0):
-				avgSpeed = trafficData['avgSpeed'][rowIdx]
+				avgSpeed = trafficData['avgSpeed'][rowIdx] #average speed should be km/h
 				vehicleCount = trafficData['vehicleCount'][rowIdx]
-				avgSpeedMeterPerSec = avgSpeed * 0.44704 #1 mile per hour = 0.44704 meter per second
-				speedLimitMeterPerSec = speedLimit * 0.44704
+				avgSpeedMeterPerSec = avgSpeed * 0.277778 #1 km per hour = 0.277778 meter per second
+				speedLimitMeterPerSec = speedLimit * 0.277778
 				if avgSpeedMeterPerSec > 0:
 					travelTimeMatrix[edgeId][timeIdx] = length / avgSpeedMeterPerSec
 				else:
 					travelTimeMatrix[edgeId][timeIdx] = length / speedLimitMeterPerSec
 				#emission Wang 2017 CO2 - equation 9 and table 1
-				avgSpeedFootPerSecond = avgSpeed * 1.46667 #1 mile per hour = 1.46667 foot per second
+				avgSpeedFootPerSecond = avgSpeed * 0.911344 #1 km per hour = 0.911344 foot per second
+				speedLimitFootPerSecond = speedLimit * 0.911344
 				if trafficData['avgMeasuredTime'][rowIdx] > 0:
-					vehiclePerSecond = vehicleCount*1.0 / trafficData['avgMeasuredTime'][rowIdx] 				
+					vehiclePerSecond = float(vehicleCount+1) / trafficData['avgMeasuredTime'][rowIdx]  #count the current vehicle				
 				else:
-					vehiclePerSecond = 0
+					# vehiclePerSecond = 0
+					vehiclePerSecond = float(1.0)/300   #count the current vehicle only, and divide by the default 5 minutes interval
+					# need to avoid vehicle 
 				vehiclePerHour = vehiclePerSecond * 3600
 				if avgSpeedFootPerSecond > 0:
 					speedForTEC = avgSpeedFootPerSecond
 				else:
-					speedForTEC = speedLimitMeterPerSec
-				TEC = (0.00051*3.3963*math.exp(0.014561*speedForTEC)/(1000*speedForTEC))*lengthInFoot*vehiclePerHour
+					speedForTEC = speedLimitFootPerSecond
+				#emission: 
+				# TEC =
+				TECPerHour = (0.00051*3.3963*math.exp(0.014561*speedForTEC)/(1000*speedForTEC))*lengthInFoot*vehiclePerHour
 				+ (0.00136*2.7843*math.exp(0.015062*speedForTEC)/(10000*speedForTEC))*lengthInFoot*vehiclePerHour
-				+ (0.00103*1.5718*math.exp(0.040732*speedForTEC)/(10000*speedForTEC))*lengthInFoot*vehiclePerHour				
-				emissionMatrix[edgeId][timeIdx] = TEC 
+				+ (0.00103*1.5718*math.exp(0.040732*speedForTEC)/(10000*speedForTEC))*lengthInFoot*vehiclePerHour							
+				#debug: 
+				# if (edgeId == 76 and timeIdx == 3) or (edgeId == 385 and timeIdx == 3) or (edgeId == 260 and timeIdx == 2) or (edgeId == 0 and timeIdx == 0):
+					# print('s:',s,',t:',t, ',timeIdx:',timeIdx)
+					# print('speedForTEC=',speedForTEC,',avgSpeed=',avgSpeed, ',speedLimit=',speedLimit, ',vehicleCount=',vehicleCount,',lengthInFoot=',lengthInFoot,',vehicleCount=',vehicleCount, ',TEC=',TEC)
+				# emissionMatrix[edgeId][timeIdx] = TEC 
+				emissionMatrix[edgeId][timeIdx] = TECPerHour
 				rowIdx = rowIdx + 1
 			timeIdx = timeIdx + 1
 	print('data read complete')
@@ -551,6 +567,8 @@ def MOOSP(x): #for Platypus package (not good for path finding)
 G, distMatrix, turnMatrix, travelTimeMatrix, emissionMatrix = read_traffic_data()
 edges = list(G.edges)
 nodes = list(G.nodes)
+# print('index of 4349 is ',nodes.index('4349'))
+# print('distMatrix of 4349\n',distMatrix[nodes.index('4349'),:])
 numNodes = G.number_of_nodes()
 #single objective shortest path:
 startNode = '4320'
@@ -560,82 +578,208 @@ endIdx = nodes.index(endNode)
 problemSize = numNodes * numNodes
 astarPath = nx.astar_path(G, startNode,endNode, weight='length')
 print('A* path:\n',astarPath)
-print('A* path scores:\n',fitness_scores(astarPath))
-initPopulationSize = 100
-numGenerations = 50
-tournamentSize = 2 
-numObjectives = 4 
-numConfigs = 4
-population = create_population()
-# print('population:\n',population)
-for config in range(numConfigs): 
-	print('NSGAII Configuration ',config)
-	for generation in range(numGenerations):
-		if generation % 10 == 0:
-			print('Generation %i\n'%generation)
-		if config == 0:
-			population = breed_population(population) #default: NBX with no mutation 
-		if config == 1: 
-			population = breed_population(population, CROSSOVER_MNX, MUTATION_NO) #MNX with no mutation
-		if config == 2:
-			population = breed_population(population, CROSSOVER_MNX, MUTATION_YES, 0.5) #MNX with mutation prob 0.5
-		if config == 3:
-			population = breed_population(population, CROSSOVER_MNX, MUTATION_YES, 0.8) #MNX with mutation prob 0.8		
-		scores = score_population(population)
-		population = build_pareto_population(population, scores)
-	#get final pareto front
-	scores = score_population(population)
-	populationIds = np.arange(len(population))
-	print('before final pareto front: len of population:', len(population))
-	paretoFront = identify_pareto(scores, populationIds)
-	paretoFrontList = list(paretoFront)
-	finalSolutions = []
-	finalScores = []
-	for i in range(len(population)):
-		if i in paretoFrontList:
-			finalSolutions.append(population[i])
-			finalScores.append(scores[i])
-	print('after final pareto front: len of population:', len(finalSolutions))
-	print('final solutions:')
-	for i in range(len(finalSolutions)):
-		print('path ',i,':',finalSolutions[i])
-		print('scores:',finalScores[i])
+# minTECPathExample = ['4320', '4364', '4349', '4350', '4362', '4564', '4581', '4582', '3181', '3978', '3186', '3187', '3189', '3190', '4375', '3989', '3979', '3990', '4373', '3987', '2651', '3986', '4559', '4562', '4561', '4551']
+# print('number of nodes:',G.number_of_nodes())
+# print('number of edges:',G.number_of_edges())
+# astartEdges = [(astarPath[n],astarPath[n+1]) for n in range(len(astarPath)-1)]
+# minTECEdges = [(minTECPathExample[n],minTECPathExample[n+1]) for n in range(len(minTECPathExample)-1)]
+# currTimeIdx = 0
+# total_travelTime = 0
+# for i in range(len(astarPath)-1):
+# 	currNode = astarPath[i]
+# 	nextNode = astarPath[i+1]
+# 	edgeId = edges.index((currNode, nextNode))
+# 	print(currNode, nextNode, ' ID:', edgeId, ',currTimeIdx:',currTimeIdx, ',length:',G.edges[currNode, nextNode]['length'], ',speedLimit:',G.edges[currNode, nextNode]['speedLimit'])
+# 	print('travelTimeMatrix',travelTimeMatrix[edgeId][currTimeIdx])
+# 	print('emissionMatrix', emissionMatrix[edgeId][currTimeIdx])
+# 	total_travelTime = total_travelTime + travelTimeMatrix[edgeId][currTimeIdx]
+# 	currTimeIdx = math.floor(total_travelTime/300) #every time instance is 5 minutes (300 seconds)
+# print('minTECPathExample:\n',minTECPathExample)
+# currTimeIdx = 0
+# total_travelTime = 0
+# for i in range(len(minTECPathExample)-1):
+# 	currNode = minTECPathExample[i]
+# 	nextNode = minTECPathExample[i+1]
+# 	edgeId = edges.index((currNode, nextNode))
+# 	print(currNode, nextNode, ' ID:', edgeId, ',currTimeIdx:',currTimeIdx, ',length:',G.edges[currNode, nextNode]['length'], ',speedLimit:',G.edges[currNode, nextNode]['speedLimit'])
+# 	print('travelTimeMatrix',travelTimeMatrix[edgeId][currTimeIdx])
+# 	print('emissionMatrix', emissionMatrix[edgeId][currTimeIdx])
+# 	total_travelTime = total_travelTime + travelTimeMatrix[edgeId][currTimeIdx]
+# 	currTimeIdx = math.floor(total_travelTime/300) #every time instance is 5 minutes (300 seconds)
 
-	finalScores = np.asarray(finalScores)
+for iteration in range(10):
+	print('Iteration ',iteration)
+	for exp in range(1,2):
+		if exp == 0:
+			dynamicFlag = DYNAMIC_NO
+			print('Static Path Finding...')
+		else:
+			dynamicFlag = DYNAMIC_YES
+			print('Dynamic Path Finding...')
+		astrarScores = fitness_scores(astarPath, dynamicFlag) 
+		print('A* path scores:\n',astrarScores)
+		#NSGAII 
+		initPopulationSize = 100
+		numGenerations = 50
+		tournamentSize = 2 
+		numObjectives = 4 
+		numConfigs = 4
+		population = create_population()
+		# print('population:\n',population)
+		for config in range(3,numConfigs):  #only take the last config now
+			# print('NSGAII Configuration ',config)
+			for generation in range(numGenerations):
+				if generation % 10 == 0:
+					print('Generation %i\n'%generation)
+				if config == 0:
+					population = breed_population(population, dynamicFlag) #default: NBX with no mutation 
+				if config == 1: 
+					population = breed_population(population, dynamicFlag, CROSSOVER_MNX, MUTATION_NO) #MNX with no mutation
+				if config == 2:
+					population = breed_population(population, dynamicFlag, CROSSOVER_MNX, MUTATION_YES, 0.5) #MNX with mutation prob 0.5
+				if config == 3:
+					population = breed_population(population, dynamicFlag, CROSSOVER_MNX, MUTATION_YES, 0.8) #MNX with mutation prob 0.8		
+				scores = score_population(population, dynamicFlag)
+				population = build_pareto_population(population, scores)
+			#get final pareto front
+			scores = score_population(population, dynamicFlag)
+			populationIds = np.arange(len(population))
+			# print('before final pareto front: len of population:', len(population))
+			paretoFront = identify_pareto(scores, populationIds)
+			paretoFrontList = list(paretoFront)
+			finalSolutions = []
+			finalScores = []
+			for i in range(len(population)):
+				if i in paretoFrontList:
+					finalSolutions.append(population[i])
+					finalScores.append(scores[i])
+			# print('after final pareto front: len of population:', len(finalSolutions))
+			# print('final solutions:')
+			# for i in range(len(finalSolutions)):
+			# 	print('path ',i,':',finalSolutions[i])
+			# 	print('scores:',finalScores[i])
 
-	fig = plt.figure()
-	# fig.set_size_inches(20, 20)
-	ax = fig.add_subplot(111, projection='3d')
-	title = 'From Node 4320(Hinnerup) to Node 4551(Hasselager) in Aarhus, Denmark\n'
-	if config == 0:
-		title = title + 'NSGAII - Single Point Crossover, No Mutation'
-	if config == 1:
-		title = title + 'NSGAII - Multi Point Crossover, No Mutation'
-	if config == 2:
-		title = title + 'NSGAII - Multi Point Crossover, Mutation Prob 0.5'		
-	if config == 3:
-		title = title + 'NSGAII - Multi Point Crossover, Mutation Prob 0.8'					
-	fig.suptitle(title)
-	x = finalScores[:,0]
-	y = finalScores[:,1]
-	z = finalScores[:,2]
-	c = finalScores[:,3]
-	ax.set_xlabel('Objective 1 - min distance (KM)')
-	ax.set_ylabel('Objective 2 - min turns')
-	ax.set_zlabel('Objective 3 - min travel time (minutes)')
-	# ax.set_xlim([20, 40])  #hard code these limits here for now for fair visual comparison - not flexible
-	# ax.set_ylim([8, 32])
-	# ax.set_zlim([15, 70])
+			finalScores = np.asarray(finalScores)
+			x = np.around(finalScores[:,0], decimals = 3)
+			y = np.round(finalScores[:,1], decimals = 3)
+			z = finalScores[:,2]
+			c = np.round(finalScores[:,3], decimals = 3)
+			finalScores2 = np.array(list(zip(x,y,z,c)))
+			title = 'From Node 4320(Hinnerup) to Node 4551(Hasselager) in Aarhus, Denmark\n'
+			if config == 0:
+				title = title + 'NSGAII - Single Point Crossover, No Mutation'
+			if config == 1:
+				title = title + 'NSGAII - Multi Point Crossover, No Mutation'
+			if config == 2:
+				title = title + 'NSGAII - Multi Point Crossover, Mutation Prob 0.5'		
+			if config == 3:
+				title = title + 'NSGAII - Multi Point Crossover, Mutation Prob 0.8'			
 
-	# img = ax.scatter(x, y, z, c=c, cmap=plt.hot())
-	pnt3d = ax.scatter(x, y, z, c=c)
-	cbar = plt.colorbar(pnt3d)
-	cbar.set_label("Objective 4 - min total vehicle emission cost (TEC)")
+			#visualization 1: 3D + color plot 
+			# fig = plt.figure()
+			# # fig.set_size_inches(20, 20)
+			# ax = fig.add_subplot(111, projection='3d')				
+			# fig.suptitle(title)
+			# ax.set_xlabel('Objective 1 - min distance (KM)')
+			# ax.set_ylabel('Objective 2 - min turns')
+			# ax.set_zlabel('Objective 3 - min travel time (minutes)')
+			# # ax.set_xlim([20, 40])  #hard code these limits here for now for fair visual comparison - not flexible
+			# # ax.set_ylim([8, 32])
+			# # ax.set_zlim([15, 70])
 
-	# fig.colorbar(img)
-	figName = 'MultObjectivePathFindingConfig'+str(config)+'.png'
-	plt.savefig(figName)
-	# plt.show()
+			# # img = ax.scatter(x, y, z, c=c, cmap=plt.hot())
+			# pnt3d = ax.scatter(x, y, z, c=c)
+			# cbar = plt.colorbar(pnt3d)
+			# cbar.set_label("Objective 4 - min total vehicle emission cost (TEC)")
+
+			# # fig.colorbar(img)
+			# figName = 'MultObjectivePathFindingConfig'+str(config)+'.png'
+			# plt.savefig(figName)
+			# plt.show()	
+
+			#visualization 2: parallel cooridinates
+			# fig2 = go.Figure(data=
+			# 	go.Parcoords(
+			# 		line=dict(
+			# 			color=c, 
+			# 			# colorscale = 'Electric', 
+			# 			showscale = True),
+			# 		dimensions = list([
+			# 			dict(label= 'Distance (KM)', values = x),
+			# 			dict(label='Turns', values = y),
+			# 			dict(label='Time (Minutes)', values = z)
+			# 			])
+			# 		)
+			# 	)	
+			# fig2.show()
+			# mooDfObj = pd.DataFrame(finalScores, columns = ['Distance','Turns','Time','TEC'])
+			mooDfObj = pd.DataFrame(finalScores2, columns = ['TEC', 'Time','Turns','Distance'])
+			fig3 = px.parallel_coordinates(
+				mooDfObj, 
+				color="TEC", 
+				labels={"TEC":"Total Emission Cost (TEC)", "Time":"Time (Minutes)", "Turns":"# Turns", "Distance":"Distance (KM)"}
+				)
+			fig3.show()
+			# figName = "images/fig3_Iter"+str(iteration)+".png"
+			# fig3.write_image(figName)
+		G2 = nx.DiGraph()
+		#path with minimum emission 
+		# minTECIndices = np.where(finalScores[:,3] == np.amin(finalScores[:,3]))
+		minTECIndices = np.where(finalScores[:,0] == np.amin(finalScores[:,0]))
+		minTECIndex = minTECIndices[0][0]
+		minTimeIndices = np.where(finalScores[:,1] == np.amin(finalScores[:,1]))
+		minTimeIndex = minTimeIndices[0][0]
+		minTurnIndices = np.where(finalScores[:,2] == np.amin(finalScores[:,2]))
+		minTurnIndex = minTurnIndices[0][0]
+		minDistanceIndices = np.where(finalScores[:,3] == np.amin(finalScores[:,3]))
+		minDistanceIndex = minDistanceIndices[0][0]	
+		# print('minTECIndices:',minTECIndices, ',minTECIndices[0]:',minTECIndices[0],',minTECIndex:',minTECIndex)
+		minTECPath = finalSolutions[minTECIndex]
+		minTimePath = finalSolutions[minTimeIndex]
+		minTurnPath = finalSolutions[minTurnIndex]
+		minDistancePath = finalSolutions[minDistanceIndex]
+		routes=[]
+		edges=[]
+		routes.append(astarPath)
+		routes.append(minTECPath)
+		routes.append(minTimePath)
+		routes.append(minTurnPath)
+		routes.append(minDistancePath)
+		for r in routes:
+			route_edges = [(r[n],r[n+1]) for n in range(len(r)-1)]
+			G2.add_nodes_from(r)
+			G2.add_edges_from(route_edges)
+			edges.append(route_edges)
+		# print('edges[0]:',edges[0])
+		# print('edges[1]:',edges[1])
+		pos={}
+		for node in G2.nodes():
+			#get position data from the main graph
+			pos[node] = [G.node[node]['pos'][0],G.node[node]['pos'][1]]	
+		# pos = nx.spring_layout(G2)
+		lab=dict(zip(G2,G2.nodes())) #use node id as label
+		nx.draw(G2,pos=pos,node_size=30, with_labels=False) #first suppress the default labels
+		nx.draw_networkx_nodes(G2, pos=pos, nodelist=minDistancePath,node_color='blue', node_size=30)
+		nx.draw_networkx_nodes(G2, pos=pos, nodelist=minTurnPath,node_color='orange', node_size=30)
+		nx.draw_networkx_nodes(G2, pos=pos, nodelist=minTimePath,node_color='yellow', node_size=30)
+		nx.draw_networkx_nodes(G2, pos=pos, nodelist=minTECPath,node_color='green', node_size=30)
+		nx.draw_networkx_nodes(G2, pos=pos, nodelist=astarPath,node_color='red', node_size=30)
+		nx.draw_networkx_nodes(G2, pos=pos, nodelist=[startNode, endNode],node_color='red', node_size=50)
+		# nx.draw_networkx_labels(G2, pos=pos)
+		nx.draw_networkx_labels(G2,pos, lab, font_size=8) #then draw with the custom labels
+		# nx.draw_networkx_edges(G2, pos=pos)
+		# nx.draw_networkx_edges(G2, pos=pos, edgeList = edges[1], edge_color = 'b')
+		# nx.draw_networkx_edges(G2, pos=pos, edgeList = edges[0], edge_color = 'r')
+		plt.savefig("images/DynamicPaths"+str(iteration)+".png")
+		# plt.show()
+		print('minTECPath:',minTECPath)
+		print('minTECPath scores', finalScores[minTECIndex,:])
+		print('minTimePath:',minTimePath)
+		print('minTimePath scores', finalScores[minTimeIndex,:])
+		print('minTurnPath:',minTurnPath)
+		print('minTurnPath scores', finalScores[minTurnIndex,:])
+		print('minDistancePath:',minDistancePath)
+		print('minDistancePath scores', finalScores[minDistanceIndex,:])
 
 print('done')
 
